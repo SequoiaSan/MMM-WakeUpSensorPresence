@@ -1,0 +1,15 @@
+{
+  "name": "MMM-WakeUpSensorPresence",
+  "version": "1.0.0",
+  "description": "MagicMirror² module for HLK-LD2410 presence-based show/hide control.",
+  "main": "node_helper.js",
+  "keywords": [
+    "MagicMirror",
+    "presence",
+    "HLK-LD2410",
+    "sensor",
+    "wake"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}
