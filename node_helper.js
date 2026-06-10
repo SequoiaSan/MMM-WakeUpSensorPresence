@@ -28,6 +28,9 @@ module.exports = NodeHelper.create({
         console.log("[MMM-WakeUpSensorPresence] Node helper starting.");
         this.config = null;
         this.presenceProc = null;
+        this.restartTimer = null;
+        this.restartCount = 0;
+        this._watcherGen = 0;
     },
 
     socketNotificationReceived: function (notification, payload) {
@@ -46,6 +49,8 @@ module.exports = NodeHelper.create({
 
     _startPresenceWatcher: function () {
         this._stopPresenceWatcher();
+        this.restartCount = 0;
+        this._watcherGen++;
 
         const pin = this.config.sensorPin;
         const chip = this.config.sensorChip || "gpiochip0";
@@ -142,12 +147,16 @@ module.exports = NodeHelper.create({
                 if (this.config.debug) {
                     console.log("[MMM-WakeUpSensorPresence] Rising edge → present=true  (raw: " + line + ")");
                 }
+                this.restartCount = 0;
                 this.sendSocketNotification("PRESENCE_UPDATE", { present: true });
             } else if (text.includes("falling")) {
                 if (this.config.debug) {
                     console.log("[MMM-WakeUpSensorPresence] Falling edge → present=false (raw: " + line + ")");
                 }
+                this.restartCount = 0;
                 this.sendSocketNotification("PRESENCE_UPDATE", { present: false });
+            } else if (this.config.debug && String(line || "").trim()) {
+                console.log("[MMM-WakeUpSensorPresence] Unrecognised gpiomon output (raw: " + line + ")");
             }
         });
 
@@ -157,15 +166,43 @@ module.exports = NodeHelper.create({
             const stderr = stderrChunks.join("").trim();
             const elapsed = Date.now() - startedAt;
 
+            if (this.config.debug) {
+                console.log("[MMM-WakeUpSensorPresence] gpiomon exited" +
+                    " (code=" + code + ", signal=" + signal +
+                    ", elapsed=" + elapsed + "ms, chip=" + resolvedChip + ")" +
+                    (stderr ? (", stderr: " + stderr) : ""));
+            }
+
             if (allowFallback && elapsed < 2000) {
                 this._spawnGpiomon("gpiochip4", pin, false);
                 return;
             }
 
-            this.sendSocketNotification("SENSOR_ERROR", {
-                error: "gpiomon exited unexpectedly (code=" + code +
-                    ", signal=" + signal + "). " + (stderr ? ("stderr: " + stderr) : "")
-            });
+            // Auto-restart with exponential backoff so edge events keep working
+            // after transient failures (line contention, kernel quirks, etc.).
+            const MAX_RESTARTS = 10;
+            if (this.restartCount < MAX_RESTARTS) {
+                this.restartCount++;
+                const delay = Math.min(Math.pow(2, this.restartCount - 1) * 1000, 30000);
+                const chipToUse = resolvedChip;
+                const gen = this._watcherGen;
+                console.log("[MMM-WakeUpSensorPresence] gpiomon exited unexpectedly" +
+                    " (code=" + code + ", signal=" + signal + ")." +
+                    (stderr ? (" stderr: " + stderr) : "") +
+                    " Restarting in " + delay + "ms (attempt " + this.restartCount + "/" + MAX_RESTARTS + ").");
+                this.restartTimer = setTimeout(() => {
+                    this.restartTimer = null;
+                    if (this.config && this._watcherGen === gen) {
+                        this._spawnGpiomon(chipToUse, pin, false);
+                    }
+                }, delay);
+            } else {
+                this.sendSocketNotification("SENSOR_ERROR", {
+                    error: "gpiomon exited unexpectedly (code=" + code +
+                        ", signal=" + signal + ") and max restarts reached. " +
+                        (stderr ? ("stderr: " + stderr) : "")
+                });
+            }
         });
     },
 
@@ -199,6 +236,11 @@ module.exports = NodeHelper.create({
     },
 
     _stopPresenceWatcher: function () {
+        this._watcherGen++;
+        if (this.restartTimer) {
+            clearTimeout(this.restartTimer);
+            this.restartTimer = null;
+        }
         if (this.presenceProc) {
             const proc = this.presenceProc;
             this.presenceProc = null;
