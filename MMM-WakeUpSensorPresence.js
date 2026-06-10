@@ -64,7 +64,9 @@ Module.register("MMM-WakeUpSensorPresence", {
     _ensureElements: function () {
         if (!document.body) { return; }
         if (this.config.debug) {
-            if (!this.debugPanel || !this.debugPanel.isConnected) {
+            if (!this.debugPanel) {
+                this._createDebugPanel();
+            } else if (!this.debugPanel.isConnected) {
                 this.debugPanel = null;
                 this._createDebugPanel();
             }
@@ -183,5 +185,9 @@ Module.register("MMM-WakeUpSensorPresence", {
 
     getDom: function () {
         return document.createElement("div");
+    },
+
+    stop: function () {
+        this._clearTimers();
     }
 });
