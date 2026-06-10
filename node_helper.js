@@ -65,16 +65,16 @@ module.exports = NodeHelper.create({
         const major = gpiomonMajorVersion();
         const bias = this.config.sensorBias || "as-is";
 
-        // Watch for rising edges only – any output line means the sensor
-        // fired.  The frontend manages the absence timeout, just like
-        // MMM-WakeUpSensor does for its PIR.
+        // Watch both edges: HIGH = presence detected, LOW = no presence.
+        // Per HLK-LD2410B datasheet, the OUT pin is high while a person is
+        // present and goes low when the sensor's own timeout expires.
         let args;
         if (major === 1) {
-            args = ["-r", "-F", "%e %o", chip, String(pin)];
+            args = ["-F", "%e %o", chip, String(pin)];
         } else {
             args = (bias !== "as-is")
-                ? ["-e", "rising", "-c", chip, "-b", bias, "-F", "%e %o", String(pin)]
-                : ["-e", "rising", "-c", chip, "-F", "%e %o", String(pin)];
+                ? ["-c", chip, "-b", bias, "-F", "%e %o", String(pin)]
+                : ["-c", chip, "-F", "%e %o", String(pin)];
         }
 
         let proc;
@@ -111,14 +111,20 @@ module.exports = NodeHelper.create({
 
         const rl = readline.createInterface({ input: proc.stdout });
         rl.on("line", (line) => {
-            // Any non-empty line on stdout means a rising edge was observed –
-            // exactly the same contract as MMM-WakeUpSensor's PIR handler.
-            if (line && line.length > 0) {
-                if (this.config.debug) {
-                    console.log("[MMM-WakeUpSensorPresence] Rising edge detected (raw: " + line + ")");
-                }
-                this.restartCount = 0;
+            // Each line is an edge event from gpiomon ("-F %e %o").
+            // "rising"  (RISING_EDGE / rising-edge)  → sensor output HIGH → presence
+            // "falling" (FALLING_EDGE / falling-edge) → sensor output LOW  → no presence
+            if (!line || line.length === 0) { return; }
+            const isRising = /rising/i.test(line);
+            if (this.config.debug) {
+                console.log("[MMM-WakeUpSensorPresence] Edge detected (raw: " + line + ")" +
+                    " → " + (isRising ? "PRESENCE" : "GONE"));
+            }
+            this.restartCount = 0;
+            if (isRising) {
                 this.sendSocketNotification("PRESENCE_DETECTED", {});
+            } else {
+                this.sendSocketNotification("PRESENCE_GONE", {});
             }
         });
 
