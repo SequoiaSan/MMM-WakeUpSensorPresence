@@ -2,6 +2,7 @@ Module.register("MMM-WakeUpSensorPresence", {
     defaults: {
         sensorPin: 4,
         sensorChip: "gpiochip0",
+        sensorBias: "pull-down",
         fadeDuration: 1000,
         debug: false,
         excludedModules: []
@@ -122,7 +123,8 @@ Module.register("MMM-WakeUpSensorPresence", {
         var lines = [
             "WakeUpSensorPresence Debug",
             "isPresent: " + this.isPresent,
-            "Last update: " + lastSeen
+            "Last update: " + lastSeen,
+            "bias: " + (this.config.sensorBias || "as-is")
         ];
         if (this.debugInfo.lastSensorError) {
             lines.push("Sensor error: " + this.debugInfo.lastSensorError);
