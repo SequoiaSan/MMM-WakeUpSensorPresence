@@ -54,10 +54,10 @@ module.exports = NodeHelper.create({
 
         const pin = this.config.sensorPin;
         const chip = this.config.sensorChip || "gpiochip0";
-        this._spawnGpiomon(chip, pin, chip === "gpiochip0");
+        this._spawnGpiomon(chip, pin);
     },
 
-    _spawnGpiomon: function (chip, pin, allowFallback) {
+    _spawnGpiomon: function (chip, pin) {
         const major = gpiomonMajorVersion();
         const bias = this.config.sensorBias || "as-is";
         const buildArgs = function (c) {
@@ -70,39 +70,23 @@ module.exports = NodeHelper.create({
         };
         const args = buildArgs(chip);
 
-        // Read the initial GPIO value before spawning gpiomon to avoid line
+        // Read the initial GPIO value before spawning gpiomon to capture the
+        // current state when no edge event fires at startup, and to avoid line
         // contention on kernels / libgpiod v2 builds that hold the line
-        // exclusively.  The read is best-effort: if it fails (wrong chip,
-        // permissions, etc.) we still start the watcher and rely on the first
-        // edge event to determine presence.
+        // exclusively.  Best-effort: if it fails we still start the watcher
+        // and rely on the first edge event to determine presence.
         let initialValue = null;
-        let resolvedChip = chip;
-        const chipsToTry = allowFallback ? ["gpiochip4", chip] : [chip];
-        for (const tryChip of chipsToTry) {
-            try {
-                initialValue = this._readCurrentValue(tryChip, pin);
-                if (initialValue !== null) {
-                    resolvedChip = tryChip;
-                    if (this.config.debug) {
-                        console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initialValue +
-                            " (chip=" + tryChip + ") → present=" + (initialValue === 1));
-                    }
-                    break;
-                }
-            } catch (e) {
-                if (this.config.debug) {
-                    console.log("[MMM-WakeUpSensorPresence] Could not read initial GPIO value" +
-                        " (chip=" + tryChip + "): " + e.message);
-                }
+        try {
+            initialValue = this._readCurrentValue(chip, pin);
+            if (this.config.debug && initialValue !== null) {
+                console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initialValue +
+                    " (chip=" + chip + ") → present=" + (initialValue === 1));
             }
-        }
-
-        // If the initial read succeeded on a fallback chip, rebuild args for that chip
-        // and disable further fallback so gpiomon monitors the same line we just read.
-        if (resolvedChip !== chip) {
-            const resolvedArgs = buildArgs(resolvedChip);
-            args.splice(0, args.length, ...resolvedArgs);
-            allowFallback = false;
+        } catch (e) {
+            if (this.config.debug) {
+                console.log("[MMM-WakeUpSensorPresence] Could not read initial GPIO value" +
+                    " (chip=" + chip + "): " + e.message);
+            }
         }
 
         let proc;
@@ -117,7 +101,7 @@ module.exports = NodeHelper.create({
 
         if (this.config.debug) {
             console.log("[MMM-WakeUpSensorPresence] gpiomon spawned – " +
-                "chip=" + resolvedChip + ", pin=" + pin +
+                "chip=" + chip + ", pin=" + pin +
                 ", args=" + JSON.stringify(args));
         }
 
@@ -169,13 +153,8 @@ module.exports = NodeHelper.create({
             if (this.config.debug) {
                 console.log("[MMM-WakeUpSensorPresence] gpiomon exited" +
                     " (code=" + code + ", signal=" + signal +
-                    ", elapsed=" + elapsed + "ms, chip=" + resolvedChip + ")" +
+                    ", elapsed=" + elapsed + "ms, chip=" + chip + ")" +
                     (stderr ? (", stderr: " + stderr) : ""));
-            }
-
-            if (allowFallback && elapsed < 2000) {
-                this._spawnGpiomon("gpiochip4", pin, false);
-                return;
             }
 
             // Auto-restart with exponential backoff so edge events keep working
@@ -184,7 +163,6 @@ module.exports = NodeHelper.create({
             if (this.restartCount < MAX_RESTARTS) {
                 this.restartCount++;
                 const delay = Math.min(Math.pow(2, this.restartCount - 1) * 1000, 30000);
-                const chipToUse = resolvedChip;
                 const gen = this._watcherGen;
                 console.log("[MMM-WakeUpSensorPresence] gpiomon exited unexpectedly" +
                     " (code=" + code + ", signal=" + signal + ")." +
@@ -193,7 +171,7 @@ module.exports = NodeHelper.create({
                 this.restartTimer = setTimeout(() => {
                     this.restartTimer = null;
                     if (this.config && this._watcherGen === gen) {
-                        this._spawnGpiomon(chipToUse, pin, false);
+                        this._spawnGpiomon(chip, pin);
                     }
                 }, delay);
             } else {
