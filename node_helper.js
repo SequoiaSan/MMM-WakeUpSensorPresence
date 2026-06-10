@@ -61,6 +61,7 @@ module.exports = NodeHelper.create({
     },
 
     _spawnGpiomon: function (chip, pin, allowFallback) {
+        const QUICK_EXIT_THRESHOLD_MS = 2000;
         const major = gpiomonMajorVersion();
         const bias = this.config.sensorBias || "as-is";
 
@@ -136,7 +137,7 @@ module.exports = NodeHelper.create({
 
             // If gpiomon exits almost immediately and we are on a Pi 5
             // (Bookworm, gpiochip4), try the fallback chip once.
-            if (allowFallback && elapsed < 2000) {
+            if (allowFallback && elapsed < QUICK_EXIT_THRESHOLD_MS) {
                 console.warn("[MMM-WakeUpSensorPresence] gpiomon on " + chip +
                     " exited quickly (code=" + code + "); retrying with gpiochip4." +
                     (stderr ? (" stderr: " + stderr) : ""));

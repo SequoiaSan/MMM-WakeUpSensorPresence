@@ -145,21 +145,23 @@ Module.register("MMM-WakeUpSensorPresence", {
     },
 
     _hideAllModules: function () {
+        var self = this;
         var skip = new Set(this.config.excludedModules || []);
         MM.getModules().enumerate(function (module) {
-            if (module.identifier === this.identifier) { return; }
+            if (module.identifier === self.identifier) { return; }
             if (skip.has(module.name)) { return; }
-            module.hide(this.config.fadeDuration, { lockString: this.identifier });
-        }.bind(this));
+            module.hide(self.config.fadeDuration, { lockString: self.identifier });
+        });
     },
 
     _showAllModules: function () {
+        var self = this;
         var skip = new Set(this.config.excludedModules || []);
         MM.getModules().enumerate(function (module) {
-            if (module.identifier === this.identifier) { return; }
+            if (module.identifier === self.identifier) { return; }
             if (skip.has(module.name)) { return; }
-            module.show(this.config.fadeDuration, { lockString: this.identifier });
-        }.bind(this));
+            module.show(self.config.fadeDuration, { lockString: self.identifier });
+        });
     },
 
     getDom: function () {
