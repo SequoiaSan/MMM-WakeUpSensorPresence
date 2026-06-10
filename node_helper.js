@@ -6,15 +6,10 @@ const readline = require("readline");
 
 const LOG = "[MMM-WakeUpSensorPresence]";
 
-// Probe the major version of the installed libgpiod binaries once and cache it.
+// Cache the major version of the installed libgpiod binaries.
 //
-// libgpiod v1.x CLI:
-//   gpioget  <chip> <offset>
-//   gpiomon  -F "%e %o" <chip> <offset>
-//
-// libgpiod v2.x CLI:
-//   gpioget  -c <chip> [--bias=<bias>] <offset>
-//   gpiomon  -c <chip> [-b <bias>] -F "%e %o" <offset>
+// libgpiod v1:  gpioget <chip> <offset>
+// libgpiod v2:  gpioget -c <chip> [--bias=<bias>] <offset>
 let _gpioMajor = null;
 function gpioMajorVersion() {
     if (_gpioMajor !== null) { return _gpioMajor; }
@@ -23,7 +18,6 @@ function gpioMajorVersion() {
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"]
         });
-        console.log(LOG + " gpioget --version output: " + out.trim());
         const m = out.match(/v?(\d+)\.(\d+)/);
         if (m) {
             _gpioMajor = parseInt(m[1], 10);
@@ -33,10 +27,9 @@ function gpioMajorVersion() {
         }
     } catch (e) {
         console.error(LOG + " gpioget --version failed: " + e.message +
-            " (gpioget may not be installed; run: sudo apt install gpiod)");
+            " (install with: sudo apt install gpiod)");
     }
     if (_gpioMajor === null) { _gpioMajor = 0; }
-    console.log(LOG + " Using libgpiod major version: " + _gpioMajor);
     return _gpioMajor;
 }
 
@@ -76,38 +69,29 @@ module.exports = NodeHelper.create({
         console.log(LOG + " Starting presence watcher (gen=" + this._watcherGen +
             ", chip=" + configuredChip + ", pin=" + pin + ").");
 
-        // Probe libgpiod version now so it is always logged before any GPIO call.
         gpioMajorVersion();
 
-        // Auto-detect working chip via gpioget (handles Pi 5 gpiochip4 fallback).
         this._chip = this._detectWorkingChip(configuredChip, pin);
         console.log(LOG + " Using chip: " + this._chip);
 
-        // Read and emit the current pin level right away so startup always
-        // reflects the real sensor state, even when a person is already present.
+        // Read and emit the current pin level so startup always reflects the
+        // real sensor state, even when a person is already present.
         const initialValue = this._readPin(this._chip, pin);
         if (initialValue !== null) {
             console.log(LOG + " Initial pin state – " +
                 (initialValue === 1 ? "HIGH → PRESENCE_DETECTED" : "LOW → PRESENCE_GONE"));
-            if (initialValue === 1) {
-                this.sendSocketNotification("PRESENCE_DETECTED", {});
-            } else {
-                this.sendSocketNotification("PRESENCE_GONE", {});
-            }
+            this.sendSocketNotification(initialValue === 1 ? "PRESENCE_DETECTED" : "PRESENCE_GONE", {});
         } else {
             console.warn(LOG + " Initial pin read returned null – sensor may be unreachable.");
         }
 
-        // Start gpiomon to watch both edges for all subsequent changes.
-        this._spawnGpiomon(this._chip, pin, /*allowFallback=*/ false);
+        this._spawnGpiomon(this._chip, pin);
     },
 
-    // Try gpioget on `chip`; if that fails and chip is gpiochip0, try gpiochip4.
+    // Try gpioget on `chip`; if that fails and chip is gpiochip0, also try gpiochip4 (Pi 5).
     _detectWorkingChip: function (chip, pin) {
-        console.log(LOG + " _detectWorkingChip: testing chip=" + chip + ", pin=" + pin);
         const val = this._readPin(chip, pin);
         if (val !== null) {
-            console.log(LOG + " _detectWorkingChip: " + chip + " is accessible (pin=" + pin + " reads " + val + ").");
             return chip;
         }
         console.warn(LOG + " _detectWorkingChip: " + chip + " returned null.");
@@ -138,18 +122,22 @@ module.exports = NodeHelper.create({
                 : ["-c", chip, String(pin)];
         }
 
-        console.log(LOG + " _readPin: running: gpioget " + args.join(" "));
         try {
-            const out = execFileSync("gpioget", args, {
+            const raw = execFileSync("gpioget", args, {
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "pipe"],
                 timeout: 2000
-            });
-            const raw = out.trim();
-            const val = parseInt(raw, 10);
-            console.log(LOG + " _readPin: raw output: " + JSON.stringify(raw) + " → parsed: " + val);
-            if (val === 0 || val === 1) { return val; }
-            console.warn(LOG + " _readPin: unexpected output value: " + JSON.stringify(raw));
+            }).trim();
+
+            // libgpiod v1: plain "0" or "1"
+            const num = parseInt(raw, 10);
+            if (num === 0 || num === 1) { return num; }
+
+            // libgpiod v2: labeled format, e.g. "4"=active or "4"=inactive
+            if (raw.endsWith("=active"))   { return 1; }
+            if (raw.endsWith("=inactive")) { return 0; }
+
+            console.warn(LOG + " _readPin: unexpected output: " + JSON.stringify(raw));
         } catch (e) {
             console.error(LOG + " _readPin: gpioget failed: " + e.message +
                 (e.stderr ? (" stderr: " + e.stderr.trim()) : "") +
@@ -162,8 +150,7 @@ module.exports = NodeHelper.create({
     // Each edge line emitted by gpiomon triggers a PRESENCE_DETECTED or
     // PRESENCE_GONE notification. Restarts automatically with exponential
     // backoff on unexpected exit (line contention, transient errors, etc.).
-    _spawnGpiomon: function (chip, pin, allowFallback) {
-        const QUICK_EXIT_THRESHOLD_MS = 2000;
+    _spawnGpiomon: function (chip, pin) {
         const major = gpioMajorVersion();
         const bias = this.config.sensorBias || "as-is";
 
@@ -215,18 +202,15 @@ module.exports = NodeHelper.create({
 
         const rl = readline.createInterface({ input: proc.stdout });
         rl.on("line", (line) => {
-            if (!line || line.length === 0) { return; }
-            // "rising"  → OUT HIGH → presence detected
-            // "falling" → OUT LOW  → no presence
-            const isRising = /rising/i.test(line);
+            if (!line.trim()) { return; }
+            // libgpiod v2 outputs %e as "1" (rising) or "2" (falling);
+            // some v1 builds output the word "rising"/"falling".
+            const eventType = line.split(" ")[0];
+            const isRising = eventType === "1" || /rising/i.test(line);
             console.log(LOG + " Edge event (raw: " + line + ")" +
                 " → " + (isRising ? "PRESENCE_DETECTED" : "PRESENCE_GONE"));
             this.restartCount = 0;
-            if (isRising) {
-                this.sendSocketNotification("PRESENCE_DETECTED", {});
-            } else {
-                this.sendSocketNotification("PRESENCE_GONE", {});
-            }
+            this.sendSocketNotification(isRising ? "PRESENCE_DETECTED" : "PRESENCE_GONE", {});
         });
 
         proc.on("exit", (code, signal) => {
@@ -241,40 +225,24 @@ module.exports = NodeHelper.create({
                 ", elapsed=" + elapsed + "ms, chip=" + chip + ")" +
                 (stderr ? (", stderr: " + stderr) : ""));
 
-            // Quick exit on gpiochip0 → retry once with gpiochip4 (Pi 5).
-            if (allowFallback && elapsed < QUICK_EXIT_THRESHOLD_MS) {
-                console.warn(LOG + " gpiomon on " + chip +
-                    " exited quickly (code=" + code + "); retrying with gpiochip4." +
-                    (stderr ? (" stderr: " + stderr) : ""));
-                this._spawnGpiomon("gpiochip4", pin, /*allowFallback=*/ false);
-                return;
-            }
-
             // Auto-restart with exponential backoff (1 s, 2 s, 4 s … 30 s max).
             const MAX_RESTARTS = 10;
             if (this.restartCount < MAX_RESTARTS) {
                 this.restartCount++;
                 const delay = Math.min(Math.pow(2, this.restartCount - 1) * 1000, 30000);
                 const gen = this._watcherGen;
-                console.log(LOG + " gpiomon exited unexpectedly" +
-                    " (code=" + code + ", signal=" + signal + ")." +
-                    (stderr ? (" stderr: " + stderr) : "") +
-                    " Restarting in " + delay + "ms" +
+                console.log(LOG + " Restarting gpiomon in " + delay + "ms" +
                     " (attempt " + this.restartCount + "/" + MAX_RESTARTS + ").");
                 this.restartTimer = setTimeout(() => {
                     this.restartTimer = null;
                     if (this.config && this._watcherGen === gen) {
-                        // Re-read pin state before resuming edge watching so any
-                        // change that occurred during the restart gap is not missed.
+                        // Re-read pin state before resuming so any change during
+                        // the restart gap is not missed.
                         const v = this._readPin(this._chip, this.config.sensorPin);
                         if (v !== null) {
-                            if (v === 1) {
-                                this.sendSocketNotification("PRESENCE_DETECTED", {});
-                            } else {
-                                this.sendSocketNotification("PRESENCE_GONE", {});
-                            }
+                            this.sendSocketNotification(v === 1 ? "PRESENCE_DETECTED" : "PRESENCE_GONE", {});
                         }
-                        this._spawnGpiomon(chip, pin, /*allowFallback=*/ false);
+                        this._spawnGpiomon(chip, pin);
                     }
                 }, delay);
             } else {
