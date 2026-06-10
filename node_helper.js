@@ -4,6 +4,9 @@ const NodeHelper = require("node_helper");
 const { spawn, execFileSync } = require("child_process");
 const readline = require("readline");
 
+// Detect the major version of the installed `gpiomon` (libgpiod) binary.
+// libgpiod v1.x accepts: gpiomon -r -F "%e %o" <chip> <offset>
+// libgpiod v2.x accepts: gpiomon -e rising -c <chip> -F "%e %o" <offset>
 let _gpiomonMajor = null;
 function gpiomonMajorVersion() {
     if (_gpiomonMajor !== null) { return _gpiomonMajor; }
@@ -27,7 +30,7 @@ module.exports = NodeHelper.create({
     start: function () {
         console.log("[MMM-WakeUpSensorPresence] Node helper starting.");
         this.config = null;
-        this.presenceProc = null;
+        this.pirProc = null;
         this.restartTimer = null;
         this.restartCount = 0;
         this._watcherGen = 0;
@@ -54,39 +57,23 @@ module.exports = NodeHelper.create({
 
         const pin = this.config.sensorPin;
         const chip = this.config.sensorChip || "gpiochip0";
-        this._spawnGpiomon(chip, pin);
+        this._spawnGpiomon(chip, pin, /*allowFallback=*/ chip === "gpiochip0");
     },
 
-    _spawnGpiomon: function (chip, pin) {
+    _spawnGpiomon: function (chip, pin, allowFallback) {
         const major = gpiomonMajorVersion();
         const bias = this.config.sensorBias || "as-is";
-        const buildArgs = function (c) {
-            if (major === 1) {
-                return ["-F", "%e %o", c, String(pin)];
-            }
-            return (bias !== "as-is")
-                ? ["-e", "both", "-c", c, "-b", bias, "-F", "%e %o", String(pin)]
-                : ["-e", "both", "-c", c, "-F", "%e %o", String(pin)];
-        };
-        const args = buildArgs(chip);
 
-        // Read the initial GPIO value before spawning gpiomon to capture the
-        // current state when no edge event fires at startup, and to avoid line
-        // contention on kernels / libgpiod v2 builds that hold the line
-        // exclusively.  Best-effort: if it fails we still start the watcher
-        // and rely on the first edge event to determine presence.
-        let initialValue = null;
-        try {
-            initialValue = this._readCurrentValue(chip, pin);
-            if (this.config.debug && initialValue !== null) {
-                console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initialValue +
-                    " (chip=" + chip + ") → present=" + (initialValue === 1));
-            }
-        } catch (e) {
-            if (this.config.debug) {
-                console.log("[MMM-WakeUpSensorPresence] Could not read initial GPIO value" +
-                    " (chip=" + chip + "): " + e.message);
-            }
+        // Watch for rising edges only – any output line means the sensor
+        // fired.  The frontend manages the absence timeout, just like
+        // MMM-WakeUpSensor does for its PIR.
+        let args;
+        if (major === 1) {
+            args = ["-r", "-F", "%e %o", chip, String(pin)];
+        } else {
+            args = (bias !== "as-is")
+                ? ["-e", "rising", "-c", chip, "-b", bias, "-F", "%e %o", String(pin)]
+                : ["-e", "rising", "-c", chip, "-F", "%e %o", String(pin)];
         }
 
         let proc;
@@ -94,7 +81,8 @@ module.exports = NodeHelper.create({
             proc = spawn("gpiomon", args, { stdio: ["ignore", "pipe", "pipe"] });
         } catch (err) {
             this.sendSocketNotification("SENSOR_ERROR", {
-                error: "Failed to spawn gpiomon: " + err.message
+                error: "Failed to spawn gpiomon: " + err.message +
+                    ". Install with: sudo apt install gpiod"
             });
             return;
         }
@@ -105,20 +93,16 @@ module.exports = NodeHelper.create({
                 ", args=" + JSON.stringify(args));
         }
 
-        this.presenceProc = proc;
+        this.pirProc = proc;
         const startedAt = Date.now();
         const stderrChunks = [];
-
-        if (initialValue !== null) {
-            this.sendSocketNotification("PRESENCE_UPDATE", { present: initialValue === 1 });
-        }
 
         proc.stderr.on("data", (buf) => {
             stderrChunks.push(buf.toString());
         });
 
         proc.on("error", (err) => {
-            if (this.presenceProc !== proc) { return; }
+            if (this.pirProc !== proc) { return; }
             this.sendSocketNotification("SENSOR_ERROR", {
                 error: "gpiomon error: " + err.message
             });
@@ -126,27 +110,20 @@ module.exports = NodeHelper.create({
 
         const rl = readline.createInterface({ input: proc.stdout });
         rl.on("line", (line) => {
-            const text = String(line || "").toLowerCase();
-            if (text.includes("rising")) {
+            // Any non-empty line on stdout means a rising edge was observed –
+            // exactly the same contract as MMM-WakeUpSensor's PIR handler.
+            if (line && line.length > 0) {
                 if (this.config.debug) {
-                    console.log("[MMM-WakeUpSensorPresence] Rising edge → present=true  (raw: " + line + ")");
+                    console.log("[MMM-WakeUpSensorPresence] Rising edge detected (raw: " + line + ")");
                 }
                 this.restartCount = 0;
-                this.sendSocketNotification("PRESENCE_UPDATE", { present: true });
-            } else if (text.includes("falling")) {
-                if (this.config.debug) {
-                    console.log("[MMM-WakeUpSensorPresence] Falling edge → present=false (raw: " + line + ")");
-                }
-                this.restartCount = 0;
-                this.sendSocketNotification("PRESENCE_UPDATE", { present: false });
-            } else if (this.config.debug && String(line || "").trim()) {
-                console.log("[MMM-WakeUpSensorPresence] Unrecognised gpiomon output (raw: " + line + ")");
+                this.sendSocketNotification("PRESENCE_DETECTED", {});
             }
         });
 
         proc.on("exit", (code, signal) => {
-            if (this.presenceProc !== proc) { return; }
-            this.presenceProc = null;
+            if (this.pirProc !== proc) { return; }
+            this.pirProc = null;
             const stderr = stderrChunks.join("").trim();
             const elapsed = Date.now() - startedAt;
 
@@ -157,8 +134,18 @@ module.exports = NodeHelper.create({
                     (stderr ? (", stderr: " + stderr) : ""));
             }
 
-            // Auto-restart with exponential backoff so edge events keep working
-            // after transient failures (line contention, kernel quirks, etc.).
+            // If gpiomon exits almost immediately and we are on a Pi 5
+            // (Bookworm, gpiochip4), try the fallback chip once.
+            if (allowFallback && elapsed < 2000) {
+                console.warn("[MMM-WakeUpSensorPresence] gpiomon on " + chip +
+                    " exited quickly (code=" + code + "); retrying with gpiochip4." +
+                    (stderr ? (" stderr: " + stderr) : ""));
+                this._spawnGpiomon("gpiochip4", pin, /*allowFallback=*/ false);
+                return;
+            }
+
+            // Auto-restart with exponential backoff so edge events keep
+            // working after transient failures (line contention, etc.).
             const MAX_RESTARTS = 10;
             if (this.restartCount < MAX_RESTARTS) {
                 this.restartCount++;
@@ -167,50 +154,22 @@ module.exports = NodeHelper.create({
                 console.log("[MMM-WakeUpSensorPresence] gpiomon exited unexpectedly" +
                     " (code=" + code + ", signal=" + signal + ")." +
                     (stderr ? (" stderr: " + stderr) : "") +
-                    " Restarting in " + delay + "ms (attempt " + this.restartCount + "/" + MAX_RESTARTS + ").");
+                    " Restarting in " + delay + "ms" +
+                    " (attempt " + this.restartCount + "/" + MAX_RESTARTS + ").");
                 this.restartTimer = setTimeout(() => {
                     this.restartTimer = null;
                     if (this.config && this._watcherGen === gen) {
-                        this._spawnGpiomon(chip, pin);
+                        this._spawnGpiomon(chip, pin, /*allowFallback=*/ false);
                     }
                 }, delay);
             } else {
                 this.sendSocketNotification("SENSOR_ERROR", {
                     error: "gpiomon exited unexpectedly (code=" + code +
-                        ", signal=" + signal + ") and max restarts reached. " +
-                        (stderr ? ("stderr: " + stderr) : "")
+                        ", signal=" + signal + ") and max restarts reached." +
+                        (stderr ? (" stderr: " + stderr) : "")
                 });
             }
         });
-    },
-
-    _readCurrentValue: function (chip, pin) {
-        const major = gpiomonMajorVersion();
-        const bias = this.config.sensorBias || "as-is";
-        let args;
-        if (major === 1) {
-            args = [chip, String(pin)];
-        } else {
-            args = (bias !== "as-is")
-                ? ["-c", chip, "-b", bias, String(pin)]
-                : ["-c", chip, String(pin)];
-        }
-        const out = execFileSync("gpioget", args, {
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"]
-        }).trim();
-        // libgpiod v1: bare "0" or "1"
-        if (out === "0" || out === "1") {
-            return parseInt(out, 10);
-        }
-        // libgpiod v2: "{offset}=active", "{offset}=inactive",
-        //              "{offset}=1",      "{offset}=0"
-        const m = out.match(/=(active|inactive|0|1)$/i);
-        if (m) {
-            const val = m[1].toLowerCase();
-            return (val === "active" || val === "1") ? 1 : 0;
-        }
-        return null;
     },
 
     _stopPresenceWatcher: function () {
@@ -219,9 +178,9 @@ module.exports = NodeHelper.create({
             clearTimeout(this.restartTimer);
             this.restartTimer = null;
         }
-        if (this.presenceProc) {
-            const proc = this.presenceProc;
-            this.presenceProc = null;
+        if (this.pirProc) {
+            const proc = this.pirProc;
+            this.pirProc = null;
             try { proc.kill("SIGTERM"); } catch (e) { /* ignore */ }
         }
     },

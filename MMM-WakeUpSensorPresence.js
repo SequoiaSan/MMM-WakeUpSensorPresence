@@ -3,16 +3,18 @@ Module.register("MMM-WakeUpSensorPresence", {
         sensorPin: 4,
         sensorChip: "gpiochip0",
         sensorBias: "pull-down",
+        presenceTimeout: 15000,
         fadeDuration: 1000,
         debug: false,
         excludedModules: []
     },
 
     start: function () {
-        this.isPresent = null;
+        this.isPresent = false;
+        this.presenceTimer = null;
         this.debugPanel = null;
         this.debugInfo = {
-            lastPresence:    null,
+            lastDetectedAt:  null,
             lastSensorError: null
         };
 
@@ -24,29 +26,16 @@ Module.register("MMM-WakeUpSensorPresence", {
     },
 
     notificationReceived: function (notification) {
-        if (notification === "DOM_OBJECTS_CREATED") {
+        if (notification === "DOM_OBJECTS_CREATED" ||
+            notification === "ALL_MODULES_STARTED") {
             this._ensureElements();
-        } else if (notification === "ALL_MODULES_STARTED") {
-            this._ensureElements();
-            // Re-apply the cached presence state now that all module DOM
-            // elements are guaranteed to exist.  The initial PRESENCE_UPDATE
-            // from the node helper may have arrived before modules were ready.
-            if (this.isPresent !== null) {
-                if (this.isPresent) {
-                    this._showAllModules();
-                } else {
-                    this._hideAllModules();
-                }
-            }
         }
     },
 
     _ensureElements: function () {
         if (!document.body) { return; }
         if (this.config.debug) {
-            if (!this.debugPanel) {
-                this._createDebugPanel();
-            } else if (!this.debugPanel.isConnected) {
+            if (!this.debugPanel || !this.debugPanel.isConnected) {
                 this.debugPanel = null;
                 this._createDebugPanel();
             }
@@ -94,16 +83,17 @@ Module.register("MMM-WakeUpSensorPresence", {
         if (!this.config.debug || !this.debugPanel) { return; }
 
         var lastSeen = "never";
-        if (this.debugInfo.lastPresence !== null) {
-            lastSeen = new Date(this.debugInfo.lastPresence).toLocaleTimeString() +
-                       " (present=" + this.isPresent + ")";
+        if (this.debugInfo.lastDetectedAt !== null) {
+            lastSeen = new Date(this.debugInfo.lastDetectedAt).toLocaleTimeString();
         }
 
         var lines = [
             "WakeUpSensorPresence Debug",
             "isPresent: " + this.isPresent,
-            "Last update: " + lastSeen,
-            "bias: " + (this.config.sensorBias || "as-is")
+            "Timer: " + (this.presenceTimer ? "active" : "idle"),
+            "Last detected: " + lastSeen,
+            "bias: " + (this.config.sensorBias || "as-is"),
+            "presenceTimeout: " + this.config.presenceTimeout + "ms"
         ];
         if (this.debugInfo.lastSensorError) {
             lines.push("Sensor error: " + this.debugInfo.lastSensorError);
@@ -112,8 +102,8 @@ Module.register("MMM-WakeUpSensorPresence", {
     },
 
     socketNotificationReceived: function (notification, payload) {
-        if (notification === "PRESENCE_UPDATE") {
-            this._setPresence(!!payload.present);
+        if (notification === "PRESENCE_DETECTED") {
+            this._onPresenceDetected();
         } else if (notification === "SENSOR_ERROR") {
             Log.error(this.name + ": " + payload.error);
             this.debugInfo.lastSensorError = payload.error;
@@ -121,42 +111,55 @@ Module.register("MMM-WakeUpSensorPresence", {
         }
     },
 
-    _setPresence: function (present) {
-        if (this.isPresent === present) {
-            return;
-        }
-        this.isPresent = present;
-        this.debugInfo.lastPresence = Date.now();
+    _onPresenceDetected: function () {
+        this.debugInfo.lastDetectedAt = Date.now();
 
         if (this.config.debug) {
-            Log.info(this.name + ": presence=" + present);
+            Log.info(this.name + ": Presence detected – resetting timeout.");
         }
+
+        // Show modules on the first detection (transition from absent → present).
+        if (!this.isPresent) {
+            this.isPresent = true;
+            this._showAllModules();
+        }
+
+        // (Re)start the absence timeout.  Every new detection pulse extends
+        // the window, exactly like pirTimeout in MMM-WakeUpSensor.
+        if (this.presenceTimer) { clearTimeout(this.presenceTimer); }
+
+        var self = this;
+        this.presenceTimer = setTimeout(function () {
+            self.presenceTimer = null;
+            if (self.isPresent) {
+                self.isPresent = false;
+                if (self.config.debug) {
+                    Log.info(self.name + ": Presence timeout – hiding modules.");
+                }
+                self._hideAllModules();
+            }
+            self._updateDebugPanel();
+        }, this.config.presenceTimeout);
 
         this._updateDebugPanel();
-
-        if (present) {
-            this._showAllModules();
-        } else {
-            this._hideAllModules();
-        }
     },
 
     _hideAllModules: function () {
-        const skip = new Set(this.config.excludedModules || []);
-        MM.getModules().enumerate((module) => {
+        var skip = new Set(this.config.excludedModules || []);
+        MM.getModules().enumerate(function (module) {
             if (module.identifier === this.identifier) { return; }
             if (skip.has(module.name)) { return; }
             module.hide(this.config.fadeDuration, { lockString: this.identifier });
-        });
+        }.bind(this));
     },
 
     _showAllModules: function () {
-        const skip = new Set(this.config.excludedModules || []);
-        MM.getModules().enumerate((module) => {
+        var skip = new Set(this.config.excludedModules || []);
+        MM.getModules().enumerate(function (module) {
             if (module.identifier === this.identifier) { return; }
             if (skip.has(module.name)) { return; }
             module.show(this.config.fadeDuration, { lockString: this.identifier });
-        });
+        }.bind(this));
     },
 
     getDom: function () {
