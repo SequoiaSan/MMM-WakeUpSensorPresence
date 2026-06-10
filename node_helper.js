@@ -160,8 +160,16 @@ module.exports = NodeHelper.create({
             encoding: "utf8",
             stdio: ["ignore", "pipe", "ignore"]
         }).trim();
+        // libgpiod v1: bare "0" or "1"
         if (out === "0" || out === "1") {
             return parseInt(out, 10);
+        }
+        // libgpiod v2: "{offset}=active", "{offset}=inactive",
+        //              "{offset}=1",      "{offset}=0"
+        const m = out.match(/=(active|inactive|0|1)$/i);
+        if (m) {
+            const val = m[1].toLowerCase();
+            return (val === "active" || val === "1") ? 1 : 0;
         }
         return null;
     },
