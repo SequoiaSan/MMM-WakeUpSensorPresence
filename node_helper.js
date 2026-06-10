@@ -57,6 +57,31 @@ module.exports = NodeHelper.create({
             ? ["-F", "%e %o", chip, String(pin)]
             : ["-e", "both", "-c", chip, "-F", "%e %o", String(pin)];
 
+        // Read the initial GPIO value before spawning gpiomon to avoid line
+        // contention on kernels / libgpiod v2 builds that hold the line
+        // exclusively.  The read is best-effort: if it fails (wrong chip,
+        // permissions, etc.) we still start the watcher and rely on the first
+        // edge event to determine presence.
+        let initialValue = null;
+        const chipsToTry = allowFallback ? [chip, "gpiochip4"] : [chip];
+        for (const tryChip of chipsToTry) {
+            try {
+                initialValue = this._readCurrentValue(tryChip, pin);
+                if (initialValue !== null) {
+                    if (this.config.debug) {
+                        console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initialValue +
+                            " (chip=" + tryChip + ") → present=" + (initialValue === 1));
+                    }
+                    break;
+                }
+            } catch (e) {
+                if (this.config.debug) {
+                    console.log("[MMM-WakeUpSensorPresence] Could not read initial GPIO value" +
+                        " (chip=" + tryChip + "): " + e.message);
+                }
+            }
+        }
+
         let proc;
         try {
             proc = spawn("gpiomon", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -77,19 +102,8 @@ module.exports = NodeHelper.create({
         const startedAt = Date.now();
         const stderrChunks = [];
 
-        try {
-            const initial = this._readCurrentValue(chip, pin);
-            if (initial !== null) {
-                if (this.config.debug) {
-                    console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initial +
-                        " → present=" + (initial === 1));
-                }
-                this.sendSocketNotification("PRESENCE_UPDATE", { present: initial === 1 });
-            }
-        } catch (e) {
-            this.sendSocketNotification("SENSOR_ERROR", {
-                error: "Failed reading initial GPIO value: " + e.message
-            });
+        if (initialValue !== null) {
+            this.sendSocketNotification("PRESENCE_UPDATE", { present: initialValue === 1 });
         }
 
         proc.stderr.on("data", (buf) => {
