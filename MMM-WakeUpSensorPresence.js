@@ -3,7 +3,7 @@ Module.register("MMM-WakeUpSensorPresence", {
         sensorPin: 4,
         sensorChip: "gpiochip0",
         sensorBias: "pull-down",
-        presenceTimeout: 15000,
+        presenceTimeout: 0,
         fadeDuration: 1000,
         debug: false,
         excludedModules: []
@@ -90,7 +90,7 @@ Module.register("MMM-WakeUpSensorPresence", {
         var lines = [
             "WakeUpSensorPresence Debug",
             "isPresent: " + this.isPresent,
-            "Timer: " + (this.presenceTimer ? "active" : "idle"),
+            "Hide timer: " + (this.presenceTimer ? "active" : "idle"),
             "Last detected: " + lastSeen,
             "bias: " + (this.config.sensorBias || "as-is"),
             "presenceTimeout: " + this.config.presenceTimeout + "ms"
@@ -104,6 +104,8 @@ Module.register("MMM-WakeUpSensorPresence", {
     socketNotificationReceived: function (notification, payload) {
         if (notification === "PRESENCE_DETECTED") {
             this._onPresenceDetected();
+        } else if (notification === "PRESENCE_GONE") {
+            this._onPresenceGone();
         } else if (notification === "SENSOR_ERROR") {
             Log.error(this.name + ": " + payload.error);
             this.debugInfo.lastSensorError = payload.error;
@@ -115,31 +117,49 @@ Module.register("MMM-WakeUpSensorPresence", {
         this.debugInfo.lastDetectedAt = Date.now();
 
         if (this.config.debug) {
-            Log.info(this.name + ": Presence detected – resetting timeout.");
+            Log.info(this.name + ": Presence detected – sensor HIGH.");
         }
 
-        // Show modules on the first detection (transition from absent → present).
+        // Cancel any pending hide timer.
+        if (this.presenceTimer) {
+            clearTimeout(this.presenceTimer);
+            this.presenceTimer = null;
+        }
+
+        // Show modules on the transition from absent → present.
         if (!this.isPresent) {
             this.isPresent = true;
             this._showAllModules();
         }
 
-        // (Re)start the absence timeout.  Every new detection pulse extends
-        // the window, exactly like pirTimeout in MMM-WakeUpSensor.
+        this._updateDebugPanel();
+    },
+
+    _onPresenceGone: function () {
+        if (this.config.debug) {
+            Log.info(this.name + ": Presence gone – sensor LOW." +
+                (this.config.presenceTimeout > 0
+                    ? " Hiding in " + this.config.presenceTimeout + "ms."
+                    : " Hiding immediately."));
+        }
+
         if (this.presenceTimer) { clearTimeout(this.presenceTimer); }
 
         var self = this;
-        this.presenceTimer = setTimeout(function () {
+        var doHide = function () {
             self.presenceTimer = null;
             if (self.isPresent) {
                 self.isPresent = false;
-                if (self.config.debug) {
-                    Log.info(self.name + ": Presence timeout – hiding modules.");
-                }
                 self._hideAllModules();
             }
             self._updateDebugPanel();
-        }, this.config.presenceTimeout);
+        };
+
+        if (this.config.presenceTimeout > 0) {
+            this.presenceTimer = setTimeout(doHide, this.config.presenceTimeout);
+        } else {
+            doHide();
+        }
 
         this._updateDebugPanel();
     },
