@@ -47,6 +47,7 @@ Log out/in after group changes.
   config: {
     sensorPin: 4,            // BCM pin connected to LD2410 OUT
     sensorChip: "gpiochip0", // use "gpiochip4" on Pi 5 if needed
+    sensorBias: "pull-down", // GPIO line bias: "pull-down" (default), "pull-up", "disabled", "as-is"
     fadeDuration: 1000,      // ms, module hide/show animation
     debug: false,
     excludedModules: ["alert"] // optional module names to never hide/show
@@ -60,6 +61,7 @@ Log out/in after group changes.
 |---|---:|---|
 | `sensorPin` | `4` | BCM GPIO input connected to LD2410 `OUT` |
 | `sensorChip` | `"gpiochip0"` | gpiod chip name passed to `gpiomon` |
+| `sensorBias` | `"pull-down"` | GPIO line bias applied via libgpiod v2: `"pull-down"`, `"pull-up"`, `"disabled"`, or `"as-is"` (hardware default). Keep `"pull-down"` so a disconnected or idle sensor pin reads LOW (no presence) rather than floating HIGH. Ignored on libgpiod v1. |
 | `fadeDuration` | `1000` | Hide/show animation duration in ms |
 | `debug` | `false` | Enables debug logs in browser/server logs |
 | `excludedModules` | `[]` | Module names to skip when toggling visibility |
@@ -69,6 +71,7 @@ Log out/in after group changes.
 - This module controls visibility using MagicMirror `module.hide()` / `module.show()`.
 - The WakeUp module itself is never hidden.
 - On startup, state is read from GPIO once; if no presence is reported, modules are hidden.
+- The default `sensorBias: "pull-down"` ensures that a floating (disconnected) GPIO pin reads LOW (no presence) rather than HIGH, which is the typical pull-up default on Raspberry Pi 4. If presence is always reported as `true` regardless of whether the sensor is connected, verify that `sensorBias` is set to `"pull-down"` (requires libgpiod v2).
 
 ## License
 

@@ -37,6 +37,7 @@ module.exports = NodeHelper.create({
                 console.log("[MMM-WakeUpSensorPresence] CONFIG received – " +
                     "pin=" + this.config.sensorPin +
                     ", chip=" + (this.config.sensorChip || "gpiochip0") +
+                    ", bias=" + (this.config.sensorBias || "as-is") +
                     ", debug=true");
             }
             this._startPresenceWatcher();
@@ -53,9 +54,16 @@ module.exports = NodeHelper.create({
 
     _spawnGpiomon: function (chip, pin, allowFallback) {
         const major = gpiomonMajorVersion();
-        const args = (major === 1)
-            ? ["-F", "%e %o", chip, String(pin)]
-            : ["-e", "both", "-c", chip, "-F", "%e %o", String(pin)];
+        const bias = this.config.sensorBias || "as-is";
+        const buildArgs = function (c) {
+            if (major === 1) {
+                return ["-F", "%e %o", c, String(pin)];
+            }
+            return (bias !== "as-is")
+                ? ["-e", "both", "-c", c, "-b", bias, "-F", "%e %o", String(pin)]
+                : ["-e", "both", "-c", c, "-F", "%e %o", String(pin)];
+        };
+        const args = buildArgs(chip);
 
         // Read the initial GPIO value before spawning gpiomon to avoid line
         // contention on kernels / libgpiod v2 builds that hold the line
@@ -87,9 +95,7 @@ module.exports = NodeHelper.create({
         // If the initial read succeeded on a fallback chip, rebuild args for that chip
         // and disable further fallback so gpiomon monitors the same line we just read.
         if (resolvedChip !== chip) {
-            const resolvedArgs = (major === 1)
-                ? ["-F", "%e %o", resolvedChip, String(pin)]
-                : ["-e", "both", "-c", resolvedChip, "-F", "%e %o", String(pin)];
+            const resolvedArgs = buildArgs(resolvedChip);
             args.splice(0, args.length, ...resolvedArgs);
             allowFallback = false;
         }
@@ -165,9 +171,15 @@ module.exports = NodeHelper.create({
 
     _readCurrentValue: function (chip, pin) {
         const major = gpiomonMajorVersion();
-        const args = (major === 1)
-            ? [chip, String(pin)]
-            : ["-c", chip, String(pin)];
+        const bias = (this.config && this.config.sensorBias) || "as-is";
+        let args;
+        if (major === 1) {
+            args = [chip, String(pin)];
+        } else {
+            args = (bias !== "as-is")
+                ? ["-c", chip, "-b", bias, String(pin)]
+                : ["-c", chip, String(pin)];
+        }
         const out = execFileSync("gpioget", args, {
             encoding: "utf8",
             stdio: ["ignore", "pipe", "ignore"]
