@@ -202,10 +202,11 @@ module.exports = NodeHelper.create({
 
         const rl = readline.createInterface({ input: proc.stdout });
         rl.on("line", (line) => {
-            if (!line) { return; }
+            if (!line.trim()) { return; }
             // libgpiod v2 outputs %e as "1" (rising) or "2" (falling);
             // some v1 builds output the word "rising"/"falling".
-            const isRising = line.startsWith("1 ") || /rising/i.test(line);
+            const eventType = line.split(" ")[0];
+            const isRising = eventType === "1" || /rising/i.test(line);
             console.log(LOG + " Edge event (raw: " + line + ")" +
                 " → " + (isRising ? "PRESENCE_DETECTED" : "PRESENCE_GONE"));
             this.restartCount = 0;
