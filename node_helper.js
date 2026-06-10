@@ -171,7 +171,7 @@ module.exports = NodeHelper.create({
 
     _readCurrentValue: function (chip, pin) {
         const major = gpiomonMajorVersion();
-        const bias = (this.config && this.config.sensorBias) || "as-is";
+        const bias = this.config.sensorBias || "as-is";
         let args;
         if (major === 1) {
             args = [chip, String(pin)];
