@@ -72,7 +72,7 @@ module.exports = NodeHelper.create({
         // edge event to determine presence.
         let initialValue = null;
         let resolvedChip = chip;
-        const chipsToTry = allowFallback ? [chip, "gpiochip4"] : [chip];
+        const chipsToTry = allowFallback ? ["gpiochip4", chip] : [chip];
         for (const tryChip of chipsToTry) {
             try {
                 initialValue = this._readCurrentValue(tryChip, pin);
