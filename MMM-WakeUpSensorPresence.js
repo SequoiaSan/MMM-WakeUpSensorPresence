@@ -103,11 +103,13 @@ Module.register("MMM-WakeUpSensorPresence", {
 
     socketNotificationReceived: function (notification, payload) {
         if (notification === "PRESENCE_DETECTED") {
+            Log.info(this.name + ": Socket notification received: PRESENCE_DETECTED");
             this._onPresenceDetected();
         } else if (notification === "PRESENCE_GONE") {
+            Log.info(this.name + ": Socket notification received: PRESENCE_GONE");
             this._onPresenceGone();
         } else if (notification === "SENSOR_ERROR") {
-            Log.error(this.name + ": " + payload.error);
+            Log.error(this.name + ": SENSOR_ERROR – " + payload.error);
             this.debugInfo.lastSensorError = payload.error;
             this._updateDebugPanel();
         }
@@ -115,33 +117,32 @@ Module.register("MMM-WakeUpSensorPresence", {
 
     _onPresenceDetected: function () {
         this.debugInfo.lastDetectedAt = Date.now();
-
-        if (this.config.debug) {
-            Log.info(this.name + ": Presence detected – sensor HIGH.");
-        }
+        Log.info(this.name + ": Presence detected – sensor HIGH. (isPresent was: " + this.isPresent + ")");
 
         // Cancel any pending hide timer.
         if (this.presenceTimer) {
             clearTimeout(this.presenceTimer);
             this.presenceTimer = null;
+            Log.info(this.name + ": Cancelled pending hide timer.");
         }
 
         // Show modules on the transition from absent → present.
         if (!this.isPresent) {
             this.isPresent = true;
             this._showAllModules();
+        } else {
+            Log.info(this.name + ": Already present – no state change.");
         }
 
         this._updateDebugPanel();
     },
 
     _onPresenceGone: function () {
-        if (this.config.debug) {
-            Log.info(this.name + ": Presence gone – sensor LOW." +
-                (this.config.presenceTimeout > 0
-                    ? " Hiding in " + this.config.presenceTimeout + "ms."
-                    : " Hiding immediately."));
-        }
+        Log.info(this.name + ": Presence gone – sensor LOW." +
+            (this.config.presenceTimeout > 0
+                ? " Hiding in " + this.config.presenceTimeout + "ms."
+                : " Hiding immediately.") +
+            " (isPresent is: " + this.isPresent + ")");
 
         if (this.presenceTimer) { clearTimeout(this.presenceTimer); }
 
@@ -151,6 +152,8 @@ Module.register("MMM-WakeUpSensorPresence", {
             if (self.isPresent) {
                 self.isPresent = false;
                 self._hideAllModules();
+            } else {
+                Log.info(self.name + ": Already absent – no state change.");
             }
             self._updateDebugPanel();
         };
@@ -167,21 +170,27 @@ Module.register("MMM-WakeUpSensorPresence", {
     _hideAllModules: function () {
         var self = this;
         var skip = new Set(this.config.excludedModules || []);
+        var hidden = [];
         MM.getModules().enumerate(function (module) {
             if (module.identifier === self.identifier) { return; }
             if (skip.has(module.name)) { return; }
+            hidden.push(module.name);
             module.hide(self.config.fadeDuration, { lockString: self.identifier });
         });
+        Log.info(self.name + ": Hiding modules: [" + hidden.join(", ") + "]");
     },
 
     _showAllModules: function () {
         var self = this;
         var skip = new Set(this.config.excludedModules || []);
+        var shown = [];
         MM.getModules().enumerate(function (module) {
             if (module.identifier === self.identifier) { return; }
             if (skip.has(module.name)) { return; }
+            shown.push(module.name);
             module.show(self.config.fadeDuration, { lockString: self.identifier });
         });
+        Log.info(self.name + ": Showing modules: [" + shown.join(", ") + "]");
     },
 
     getDom: function () {

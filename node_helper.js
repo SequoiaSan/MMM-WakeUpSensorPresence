@@ -4,6 +4,8 @@ const NodeHelper = require("node_helper");
 const { spawn, execFileSync } = require("child_process");
 const readline = require("readline");
 
+const LOG = "[MMM-WakeUpSensorPresence]";
+
 // Probe the major version of the installed libgpiod binaries once and cache it.
 //
 // libgpiod v1.x CLI:
@@ -19,20 +21,28 @@ function gpioMajorVersion() {
     try {
         const out = execFileSync("gpioget", ["--version"], {
             encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"]
+            stdio: ["ignore", "pipe", "pipe"]
         });
+        console.log(LOG + " gpioget --version output: " + out.trim());
         const m = out.match(/v?(\d+)\.(\d+)/);
-        if (m) { _gpioMajor = parseInt(m[1], 10); }
+        if (m) {
+            _gpioMajor = parseInt(m[1], 10);
+            console.log(LOG + " Detected libgpiod major version: " + _gpioMajor);
+        } else {
+            console.warn(LOG + " Could not parse libgpiod version from: " + out.trim());
+        }
     } catch (e) {
-        // Binary missing or unparsable version.
+        console.error(LOG + " gpioget --version failed: " + e.message +
+            " (gpioget may not be installed; run: sudo apt install gpiod)");
     }
     if (_gpioMajor === null) { _gpioMajor = 0; }
+    console.log(LOG + " Using libgpiod major version: " + _gpioMajor);
     return _gpioMajor;
 }
 
 module.exports = NodeHelper.create({
     start: function () {
-        console.log("[MMM-WakeUpSensorPresence] Node helper starting.");
+        console.log(LOG + " Node helper starting.");
         this.config = null;
         this.monProc = null;
         this.restartTimer = null;
@@ -44,13 +54,14 @@ module.exports = NodeHelper.create({
     socketNotificationReceived: function (notification, payload) {
         if (notification === "CONFIG") {
             this.config = payload;
-            if (this.config.debug) {
-                console.log("[MMM-WakeUpSensorPresence] CONFIG received – " +
-                    "pin=" + this.config.sensorPin +
-                    ", chip=" + (this.config.sensorChip || "gpiochip0") +
-                    ", bias=" + (this.config.sensorBias || "as-is") +
-                    ", debug=true");
-            }
+            console.log(LOG + " CONFIG received – " +
+                "pin=" + this.config.sensorPin +
+                ", chip=" + (this.config.sensorChip || "gpiochip0") +
+                ", bias=" + (this.config.sensorBias || "as-is") +
+                ", presenceTimeout=" + this.config.presenceTimeout +
+                ", fadeDuration=" + this.config.fadeDuration +
+                ", debug=" + this.config.debug +
+                ", excludedModules=" + JSON.stringify(this.config.excludedModules || []));
             this._startPresenceWatcher();
         }
     },
@@ -62,23 +73,29 @@ module.exports = NodeHelper.create({
 
         const configuredChip = this.config.sensorChip || "gpiochip0";
         const pin = this.config.sensorPin;
+        console.log(LOG + " Starting presence watcher (gen=" + this._watcherGen +
+            ", chip=" + configuredChip + ", pin=" + pin + ").");
+
+        // Probe libgpiod version now so it is always logged before any GPIO call.
+        gpioMajorVersion();
 
         // Auto-detect working chip via gpioget (handles Pi 5 gpiochip4 fallback).
         this._chip = this._detectWorkingChip(configuredChip, pin);
+        console.log(LOG + " Using chip: " + this._chip);
 
         // Read and emit the current pin level right away so startup always
         // reflects the real sensor state, even when a person is already present.
         const initialValue = this._readPin(this._chip, pin);
         if (initialValue !== null) {
-            if (this.config.debug) {
-                console.log("[MMM-WakeUpSensorPresence] Initial pin state – " +
-                    (initialValue === 1 ? "HIGH → PRESENCE_DETECTED" : "LOW → PRESENCE_GONE"));
-            }
+            console.log(LOG + " Initial pin state – " +
+                (initialValue === 1 ? "HIGH → PRESENCE_DETECTED" : "LOW → PRESENCE_GONE"));
             if (initialValue === 1) {
                 this.sendSocketNotification("PRESENCE_DETECTED", {});
             } else {
                 this.sendSocketNotification("PRESENCE_GONE", {});
             }
+        } else {
+            console.warn(LOG + " Initial pin read returned null – sensor may be unreachable.");
         }
 
         // Start gpiomon to watch both edges for all subsequent changes.
@@ -87,15 +104,23 @@ module.exports = NodeHelper.create({
 
     // Try gpioget on `chip`; if that fails and chip is gpiochip0, try gpiochip4.
     _detectWorkingChip: function (chip, pin) {
+        console.log(LOG + " _detectWorkingChip: testing chip=" + chip + ", pin=" + pin);
         const val = this._readPin(chip, pin);
-        if (val !== null) { return chip; }
+        if (val !== null) {
+            console.log(LOG + " _detectWorkingChip: " + chip + " is accessible (pin=" + pin + " reads " + val + ").");
+            return chip;
+        }
+        console.warn(LOG + " _detectWorkingChip: " + chip + " returned null.");
         if (chip === "gpiochip0") {
+            console.log(LOG + " _detectWorkingChip: trying gpiochip4 (Pi 5 fallback).");
             const val4 = this._readPin("gpiochip4", pin);
             if (val4 !== null) {
-                console.log("[MMM-WakeUpSensorPresence] gpiochip0 unavailable; using gpiochip4 (Pi 5).");
+                console.log(LOG + " gpiochip0 unavailable; using gpiochip4 (Pi 5).");
                 return "gpiochip4";
             }
+            console.warn(LOG + " _detectWorkingChip: gpiochip4 also returned null.");
         }
+        console.error(LOG + " _detectWorkingChip: no working chip found; falling back to configured chip=" + chip);
         return chip;
     },
 
@@ -113,16 +138,22 @@ module.exports = NodeHelper.create({
                 : ["-c", chip, String(pin)];
         }
 
+        console.log(LOG + " _readPin: running: gpioget " + args.join(" "));
         try {
             const out = execFileSync("gpioget", args, {
                 encoding: "utf8",
-                stdio: ["ignore", "pipe", "ignore"],
+                stdio: ["ignore", "pipe", "pipe"],
                 timeout: 2000
             });
-            const val = parseInt(out.trim(), 10);
+            const raw = out.trim();
+            const val = parseInt(raw, 10);
+            console.log(LOG + " _readPin: raw output: " + JSON.stringify(raw) + " → parsed: " + val);
             if (val === 0 || val === 1) { return val; }
+            console.warn(LOG + " _readPin: unexpected output value: " + JSON.stringify(raw));
         } catch (e) {
-            // Chip not accessible or gpioget not installed.
+            console.error(LOG + " _readPin: gpioget failed: " + e.message +
+                (e.stderr ? (" stderr: " + e.stderr.trim()) : "") +
+                (e.status !== undefined ? (" exit code: " + e.status) : ""));
         }
         return null;
     },
@@ -150,6 +181,7 @@ module.exports = NodeHelper.create({
         try {
             proc = spawn("gpiomon", args, { stdio: ["ignore", "pipe", "pipe"] });
         } catch (err) {
+            console.error(LOG + " Failed to spawn gpiomon: " + err.message);
             this.sendSocketNotification("SENSOR_ERROR", {
                 error: "Failed to spawn gpiomon: " + err.message +
                     ". Install with: sudo apt install gpiod"
@@ -157,22 +189,25 @@ module.exports = NodeHelper.create({
             return;
         }
 
-        if (this.config.debug) {
-            console.log("[MMM-WakeUpSensorPresence] gpiomon spawned – " +
-                "chip=" + chip + ", pin=" + pin +
-                ", args=" + JSON.stringify(args));
-        }
+        console.log(LOG + " gpiomon spawned – pid=" + proc.pid +
+            ", chip=" + chip + ", pin=" + pin +
+            ", args=" + JSON.stringify(["gpiomon"].concat(args)));
 
         this.monProc = proc;
         const startedAt = Date.now();
         const stderrChunks = [];
 
         proc.stderr.on("data", (buf) => {
-            stderrChunks.push(buf.toString());
+            const msg = buf.toString().trim();
+            if (msg) {
+                console.warn(LOG + " gpiomon stderr: " + msg);
+                stderrChunks.push(msg);
+            }
         });
 
         proc.on("error", (err) => {
             if (this.monProc !== proc) { return; }
+            console.error(LOG + " gpiomon process error: " + err.message);
             this.sendSocketNotification("SENSOR_ERROR", {
                 error: "gpiomon error: " + err.message
             });
@@ -184,10 +219,8 @@ module.exports = NodeHelper.create({
             // "rising"  → OUT HIGH → presence detected
             // "falling" → OUT LOW  → no presence
             const isRising = /rising/i.test(line);
-            if (this.config.debug) {
-                console.log("[MMM-WakeUpSensorPresence] Edge event (raw: " + line + ")" +
-                    " → " + (isRising ? "PRESENCE_DETECTED" : "PRESENCE_GONE"));
-            }
+            console.log(LOG + " Edge event (raw: " + line + ")" +
+                " → " + (isRising ? "PRESENCE_DETECTED" : "PRESENCE_GONE"));
             this.restartCount = 0;
             if (isRising) {
                 this.sendSocketNotification("PRESENCE_DETECTED", {});
@@ -199,19 +232,18 @@ module.exports = NodeHelper.create({
         proc.on("exit", (code, signal) => {
             if (this.monProc !== proc) { return; }
             this.monProc = null;
-            const stderr = stderrChunks.join("").trim();
+            const stderr = stderrChunks.join(" ").trim();
             const elapsed = Date.now() - startedAt;
 
-            if (this.config.debug) {
-                console.log("[MMM-WakeUpSensorPresence] gpiomon exited" +
-                    " (code=" + code + ", signal=" + signal +
-                    ", elapsed=" + elapsed + "ms, chip=" + chip + ")" +
-                    (stderr ? (", stderr: " + stderr) : ""));
-            }
+            console.log(LOG + " gpiomon exited" +
+                " (pid=" + proc.pid +
+                ", code=" + code + ", signal=" + signal +
+                ", elapsed=" + elapsed + "ms, chip=" + chip + ")" +
+                (stderr ? (", stderr: " + stderr) : ""));
 
             // Quick exit on gpiochip0 → retry once with gpiochip4 (Pi 5).
             if (allowFallback && elapsed < QUICK_EXIT_THRESHOLD_MS) {
-                console.warn("[MMM-WakeUpSensorPresence] gpiomon on " + chip +
+                console.warn(LOG + " gpiomon on " + chip +
                     " exited quickly (code=" + code + "); retrying with gpiochip4." +
                     (stderr ? (" stderr: " + stderr) : ""));
                 this._spawnGpiomon("gpiochip4", pin, /*allowFallback=*/ false);
@@ -224,7 +256,7 @@ module.exports = NodeHelper.create({
                 this.restartCount++;
                 const delay = Math.min(Math.pow(2, this.restartCount - 1) * 1000, 30000);
                 const gen = this._watcherGen;
-                console.log("[MMM-WakeUpSensorPresence] gpiomon exited unexpectedly" +
+                console.log(LOG + " gpiomon exited unexpectedly" +
                     " (code=" + code + ", signal=" + signal + ")." +
                     (stderr ? (" stderr: " + stderr) : "") +
                     " Restarting in " + delay + "ms" +
@@ -246,11 +278,11 @@ module.exports = NodeHelper.create({
                     }
                 }, delay);
             } else {
-                this.sendSocketNotification("SENSOR_ERROR", {
-                    error: "gpiomon exited unexpectedly (code=" + code +
-                        ", signal=" + signal + ") and max restarts reached." +
-                        (stderr ? (" stderr: " + stderr) : "")
-                });
+                const errMsg = "gpiomon exited unexpectedly (code=" + code +
+                    ", signal=" + signal + ") and max restarts reached." +
+                    (stderr ? (" stderr: " + stderr) : "");
+                console.error(LOG + " " + errMsg);
+                this.sendSocketNotification("SENSOR_ERROR", { error: errMsg });
             }
         });
     },
@@ -264,11 +296,13 @@ module.exports = NodeHelper.create({
         if (this.monProc) {
             const proc = this.monProc;
             this.monProc = null;
+            console.log(LOG + " Stopping gpiomon (pid=" + proc.pid + ").");
             try { proc.kill("SIGTERM"); } catch (e) { /* ignore */ }
         }
     },
 
     stop: function () {
+        console.log(LOG + " Node helper stopping.");
         this._stopPresenceWatcher();
     }
 });
