@@ -30,6 +30,7 @@ module.exports = NodeHelper.create({
         this.presenceProc = null;
         this.restartTimer = null;
         this.restartCount = 0;
+        this._watcherGen = 0;
     },
 
     socketNotificationReceived: function (notification, payload) {
@@ -49,6 +50,7 @@ module.exports = NodeHelper.create({
     _startPresenceWatcher: function () {
         this._stopPresenceWatcher();
         this.restartCount = 0;
+        this._watcherGen++;
 
         const pin = this.config.sensorPin;
         const chip = this.config.sensorChip || "gpiochip0";
@@ -181,15 +183,16 @@ module.exports = NodeHelper.create({
             const MAX_RESTARTS = 10;
             if (this.restartCount < MAX_RESTARTS) {
                 this.restartCount++;
-                const delay = Math.min(1000 * this.restartCount, 30000);
+                const delay = Math.min(Math.pow(2, this.restartCount - 1) * 1000, 30000);
                 const chipToUse = resolvedChip;
+                const gen = this._watcherGen;
                 console.log("[MMM-WakeUpSensorPresence] gpiomon exited unexpectedly" +
                     " (code=" + code + ", signal=" + signal + ")." +
                     (stderr ? (" stderr: " + stderr) : "") +
                     " Restarting in " + delay + "ms (attempt " + this.restartCount + "/" + MAX_RESTARTS + ").");
                 this.restartTimer = setTimeout(() => {
                     this.restartTimer = null;
-                    if (this.config) {
+                    if (this.config && this._watcherGen === gen) {
                         this._spawnGpiomon(chipToUse, pin, false);
                     }
                 }, delay);
@@ -233,6 +236,7 @@ module.exports = NodeHelper.create({
     },
 
     _stopPresenceWatcher: function () {
+        this._watcherGen++;
         if (this.restartTimer) {
             clearTimeout(this.restartTimer);
             this.restartTimer = null;
