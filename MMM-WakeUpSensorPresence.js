@@ -11,8 +11,6 @@ Module.register("MMM-WakeUpSensorPresence", {
     start: function () {
         this.isPresent = null;
         this.debugPanel = null;
-        this._setupTimer = null;
-        this._debugLogTimer = null;
         this.debugInfo = {
             lastPresence:    null,
             lastSensorError: null
@@ -23,42 +21,23 @@ Module.register("MMM-WakeUpSensorPresence", {
         }
 
         this.sendSocketNotification("CONFIG", this.config);
-
-        // Attempt to create the debug panel once the DOM is ready.
-        var self = this;
-        var trySetup = function () { self._ensureElements(); };
-        if (document.readyState === "complete" || document.readyState === "interactive") {
-            setTimeout(trySetup, 0);
-        } else {
-            window.addEventListener("DOMContentLoaded", trySetup, { once: true });
-        }
-
-        // Watchdog: re-attach debug panel every second in case the DOM is
-        // mutated by another module or a page change.
-        if (this.config.debug) {
-            this._setupTimer = setInterval(function () {
-                self._ensureElements();
-            }, 1000);
-
-            // Periodic console snapshot so the user can verify the module is
-            // alive even when the on-screen panel is not visible.
-            this._debugLogTimer = setInterval(function () {
-                Log.info(self.name + " [debug snapshot]: " +
-                    JSON.stringify({
-                        isPresent:       self.isPresent,
-                        panelAttached:   !!(self.debugPanel && self.debugPanel.isConnected),
-                        lastPresence:    self.debugInfo.lastPresence,
-                        lastSensorError: self.debugInfo.lastSensorError
-                    }));
-            }, 5000);
-        }
     },
 
     notificationReceived: function (notification) {
-        if (notification === "DOM_OBJECTS_CREATED" ||
-            notification === "MODULE_DOM_CREATED" ||
-            notification === "ALL_MODULES_STARTED") {
+        if (notification === "DOM_OBJECTS_CREATED") {
             this._ensureElements();
+        } else if (notification === "ALL_MODULES_STARTED") {
+            this._ensureElements();
+            // Re-apply the cached presence state now that all module DOM
+            // elements are guaranteed to exist.  The initial PRESENCE_UPDATE
+            // from the node helper may have arrived before modules were ready.
+            if (this.isPresent !== null) {
+                if (this.isPresent) {
+                    this._showAllModules();
+                } else {
+                    this._hideAllModules();
+                }
+            }
         }
     },
 
@@ -132,11 +111,6 @@ Module.register("MMM-WakeUpSensorPresence", {
         this.debugPanel.textContent = lines.join("\n");
     },
 
-    _clearTimers: function () {
-        if (this._setupTimer)    { clearInterval(this._setupTimer);    this._setupTimer    = null; }
-        if (this._debugLogTimer) { clearInterval(this._debugLogTimer); this._debugLogTimer = null; }
-    },
-
     socketNotificationReceived: function (notification, payload) {
         if (notification === "PRESENCE_UPDATE") {
             this._setPresence(!!payload.present);
@@ -187,9 +161,5 @@ Module.register("MMM-WakeUpSensorPresence", {
 
     getDom: function () {
         return document.createElement("div");
-    },
-
-    stop: function () {
-        this._clearTimers();
     }
 });
