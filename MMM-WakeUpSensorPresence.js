@@ -3,7 +3,6 @@ Module.register("MMM-WakeUpSensorPresence", {
         sensorPin: 4,
         sensorChip: "gpiochip0",
         sensorBias: "pull-down",
-        pollInterval: 500,
         presenceTimeout: 0,
         fadeDuration: 1000,
         debug: false,
@@ -94,7 +93,6 @@ Module.register("MMM-WakeUpSensorPresence", {
             "Hide timer: " + (this.presenceTimer ? "active" : "idle"),
             "Last detected: " + lastSeen,
             "bias: " + (this.config.sensorBias || "as-is"),
-            "pollInterval: " + (this.config.pollInterval || 500) + "ms",
             "presenceTimeout: " + this.config.presenceTimeout + "ms"
         ];
         if (this.debugInfo.lastSensorError) {
