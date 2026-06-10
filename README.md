@@ -5,7 +5,7 @@ MagicMirror² module for **Hi-Link HLK-LD2410 (5V)** presence sensing.
 - **Presence detected** → all modules are shown
 - **No presence detected** → all modules are hidden
 
-The module watches the LD2410 digital `OUT` pin via `gpiomon` (`libgpiod`), so there are no native Node addons to rebuild.
+The module reads the LD2410 digital `OUT` pin by polling `gpioget` (`libgpiod`), so there are no native Node addons to rebuild.
 
 ## Hardware
 
@@ -48,6 +48,7 @@ Log out/in after group changes.
     sensorPin: 4,            // BCM pin connected to LD2410 OUT
     sensorChip: "gpiochip0", // use "gpiochip4" on Pi 5 if needed
     sensorBias: "pull-down", // GPIO line bias: "pull-down" (default), "pull-up", "disabled", "as-is"
+    pollInterval: 500,       // ms, how often to read the pin state
     fadeDuration: 1000,      // ms, module hide/show animation
     debug: false,
     excludedModules: ["alert"] // optional module names to never hide/show
@@ -60,8 +61,9 @@ Log out/in after group changes.
 | Option | Default | Description |
 |---|---:|---|
 | `sensorPin` | `4` | BCM GPIO input connected to LD2410 `OUT` |
-| `sensorChip` | `"gpiochip0"` | gpiod chip name passed to `gpiomon` |
+| `sensorChip` | `"gpiochip0"` | gpiod chip name passed to `gpioget` |
 | `sensorBias` | `"pull-down"` | GPIO line bias applied via libgpiod v2: `"pull-down"`, `"pull-up"`, `"disabled"`, or `"as-is"` (hardware default). Keep `"pull-down"` so a disconnected or idle sensor pin reads LOW (no presence) rather than floating HIGH. Ignored on libgpiod v1. |
+| `pollInterval` | `500` | How often (ms) to read the pin state. Lower values reduce latency; minimum is 100 ms. |
 | `fadeDuration` | `1000` | Hide/show animation duration in ms |
 | `debug` | `false` | Enables debug logs in browser/server logs |
 | `excludedModules` | `[]` | Module names to skip when toggling visibility |
@@ -70,8 +72,9 @@ Log out/in after group changes.
 
 - This module controls visibility using MagicMirror `module.hide()` / `module.show()`.
 - The WakeUp module itself is never hidden.
-- On startup, state is read from GPIO once; if no presence is reported, modules are hidden.
-- The default `sensorBias: "pull-down"` ensures that a floating (disconnected) GPIO pin reads LOW (no presence) rather than HIGH, which is the typical pull-up default on Raspberry Pi 4. If presence is always reported as `true` regardless of whether the sensor is connected, verify that `sensorBias` is set to `"pull-down"` (requires libgpiod v2).
+- On startup, the pin is read immediately so the correct state is applied right away — even if someone is already in front of the sensor.
+- The module polls `gpioget` every `pollInterval` ms. Because it reads the **current pin level** on each poll, it is always self-correcting: if any previous state is lost (e.g., MagicMirror restart), the next poll restores the correct presence/gone state.
+- The default `sensorBias: "pull-down"` ensures that a floating (disconnected) GPIO pin reads LOW (no presence) rather than HIGH. If presence is always reported as `true` regardless of whether the sensor is connected, verify that `sensorBias` is set to `"pull-down"` (requires libgpiod v2).
 
 ## License
 
