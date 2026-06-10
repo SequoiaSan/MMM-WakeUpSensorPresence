@@ -5,7 +5,7 @@ MagicMirror² module for **Hi-Link HLK-LD2410 (5V)** presence sensing.
 - **Presence detected** → all modules are shown
 - **No presence detected** → all modules are hidden
 
-The module watches the LD2410 digital `OUT` pin via `gpiomon` (`libgpiod`), so there are no native Node addons to rebuild.
+The module uses `gpioget` (`libgpiod`) to read the initial pin state at startup and `gpiomon` (`libgpiod`) to watch for subsequent edge events, so there are no native Node addons to rebuild.
 
 ## Hardware
 
@@ -60,7 +60,7 @@ Log out/in after group changes.
 | Option | Default | Description |
 |---|---:|---|
 | `sensorPin` | `4` | BCM GPIO input connected to LD2410 `OUT` |
-| `sensorChip` | `"gpiochip0"` | gpiod chip name passed to `gpiomon` |
+| `sensorChip` | `"gpiochip0"` | gpiod chip name (`gpiochip0` for Pi 1–4, `gpiochip4` for Pi 5) |
 | `sensorBias` | `"pull-down"` | GPIO line bias applied via libgpiod v2: `"pull-down"`, `"pull-up"`, `"disabled"`, or `"as-is"` (hardware default). Keep `"pull-down"` so a disconnected or idle sensor pin reads LOW (no presence) rather than floating HIGH. Ignored on libgpiod v1. |
 | `fadeDuration` | `1000` | Hide/show animation duration in ms |
 | `debug` | `false` | Enables debug logs in browser/server logs |
@@ -70,8 +70,9 @@ Log out/in after group changes.
 
 - This module controls visibility using MagicMirror `module.hide()` / `module.show()`.
 - The WakeUp module itself is never hidden.
-- On startup, state is read from GPIO once; if no presence is reported, modules are hidden.
-- The default `sensorBias: "pull-down"` ensures that a floating (disconnected) GPIO pin reads LOW (no presence) rather than HIGH, which is the typical pull-up default on Raspberry Pi 4. If presence is always reported as `true` regardless of whether the sensor is connected, verify that `sensorBias` is set to `"pull-down"` (requires libgpiod v2).
+- **Hybrid approach:** on startup, `gpioget` reads the current pin level immediately so the correct presence/gone state is applied even if someone is already in front of the sensor. After that, `gpiomon` watches for both rising and falling edges — events fire the instant the pin changes with no polling overhead.
+- If `gpiomon` exits unexpectedly (line contention, etc.) it restarts automatically with exponential backoff. Each restart re-reads the current pin level via `gpioget` first so no change is missed during the gap.
+- The default `sensorBias: "pull-down"` ensures that a floating (disconnected) GPIO pin reads LOW (no presence) rather than HIGH. If presence is always reported as `true` regardless of whether the sensor is connected, verify that `sensorBias` is set to `"pull-down"` (requires libgpiod v2).
 
 ## License
 
