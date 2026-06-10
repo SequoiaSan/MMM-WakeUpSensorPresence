@@ -25,6 +25,7 @@ function gpiomonMajorVersion() {
 
 module.exports = NodeHelper.create({
     start: function () {
+        console.log("[MMM-WakeUpSensorPresence] Node helper starting.");
         this.config = null;
         this.presenceProc = null;
     },
@@ -32,6 +33,12 @@ module.exports = NodeHelper.create({
     socketNotificationReceived: function (notification, payload) {
         if (notification === "CONFIG") {
             this.config = payload;
+            if (this.config.debug) {
+                console.log("[MMM-WakeUpSensorPresence] CONFIG received – " +
+                    "pin=" + this.config.sensorPin +
+                    ", chip=" + (this.config.sensorChip || "gpiochip0") +
+                    ", debug=true");
+            }
             this._startPresenceWatcher();
         }
     },
@@ -60,6 +67,12 @@ module.exports = NodeHelper.create({
             return;
         }
 
+        if (this.config.debug) {
+            console.log("[MMM-WakeUpSensorPresence] gpiomon spawned – " +
+                "chip=" + chip + ", pin=" + pin +
+                ", args=" + JSON.stringify(args));
+        }
+
         this.presenceProc = proc;
         const startedAt = Date.now();
         const stderrChunks = [];
@@ -67,6 +80,10 @@ module.exports = NodeHelper.create({
         try {
             const initial = this._readCurrentValue(chip, pin);
             if (initial !== null) {
+                if (this.config.debug) {
+                    console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initial +
+                        " → present=" + (initial === 1));
+                }
                 this.sendSocketNotification("PRESENCE_UPDATE", { present: initial === 1 });
             }
         } catch (e) {
@@ -90,8 +107,14 @@ module.exports = NodeHelper.create({
         rl.on("line", (line) => {
             const text = String(line || "").toLowerCase();
             if (text.includes("rising")) {
+                if (this.config.debug) {
+                    console.log("[MMM-WakeUpSensorPresence] Rising edge → present=true  (raw: " + line + ")");
+                }
                 this.sendSocketNotification("PRESENCE_UPDATE", { present: true });
             } else if (text.includes("falling")) {
+                if (this.config.debug) {
+                    console.log("[MMM-WakeUpSensorPresence] Falling edge → present=false (raw: " + line + ")");
+                }
                 this.sendSocketNotification("PRESENCE_UPDATE", { present: false });
             }
         });
