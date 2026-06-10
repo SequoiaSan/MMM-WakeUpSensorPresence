@@ -3,6 +3,9 @@
 const NodeHelper = require("node_helper");
 const { execFileSync } = require("child_process");
 
+const MIN_POLL_INTERVAL_MS = 100;
+const MAX_CONSECUTIVE_ERRORS = 5;
+
 // Detect the major version of the installed gpioget (libgpiod) binary.
 // libgpiod v1.x: gpioget <chip> <offset>    → prints "0" or "1"
 // libgpiod v2.x: gpioget -c <chip> <offset> → prints "0" or "1"
@@ -68,7 +71,7 @@ module.exports = NodeHelper.create({
         // Read initial state immediately so startup reflects current sensor output.
         this._pollPin();
 
-        const interval = Math.max(100, this.config.pollInterval || 500);
+        const interval = Math.max(MIN_POLL_INTERVAL_MS, this.config.pollInterval || 500);
         this.pollTimer = setInterval(() => this._pollPin(), interval);
     },
 
@@ -124,9 +127,9 @@ module.exports = NodeHelper.create({
                 console.log("[MMM-WakeUpSensorPresence] gpioget read failed " +
                     "(attempt " + this._consecutiveErrors + ").");
             }
-            if (this._consecutiveErrors === 5) {
+            if (this._consecutiveErrors === MAX_CONSECUTIVE_ERRORS) {
                 this.sendSocketNotification("SENSOR_ERROR", {
-                    error: "gpioget failed 5 consecutive times on " + this._chip +
+                    error: "gpioget failed " + MAX_CONSECUTIVE_ERRORS + " consecutive times on " + this._chip +
                         " pin " + this.config.sensorPin +
                         ". Ensure gpiod is installed (sudo apt install gpiod) and " +
                         "the user running MagicMirror is in the gpio group."
