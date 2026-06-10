@@ -63,11 +63,13 @@ module.exports = NodeHelper.create({
         // permissions, etc.) we still start the watcher and rely on the first
         // edge event to determine presence.
         let initialValue = null;
+        let resolvedChip = chip;
         const chipsToTry = allowFallback ? [chip, "gpiochip4"] : [chip];
         for (const tryChip of chipsToTry) {
             try {
                 initialValue = this._readCurrentValue(tryChip, pin);
                 if (initialValue !== null) {
+                    resolvedChip = tryChip;
                     if (this.config.debug) {
                         console.log("[MMM-WakeUpSensorPresence] Initial GPIO value: " + initialValue +
                             " (chip=" + tryChip + ") → present=" + (initialValue === 1));
@@ -82,6 +84,16 @@ module.exports = NodeHelper.create({
             }
         }
 
+        // If the initial read succeeded on a fallback chip, rebuild args for that chip
+        // and disable further fallback so gpiomon monitors the same line we just read.
+        if (resolvedChip !== chip) {
+            const resolvedArgs = (major === 1)
+                ? ["-F", "%e %o", resolvedChip, String(pin)]
+                : ["-e", "both", "-c", resolvedChip, "-F", "%e %o", String(pin)];
+            args.splice(0, args.length, ...resolvedArgs);
+            allowFallback = false;
+        }
+
         let proc;
         try {
             proc = spawn("gpiomon", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -94,7 +106,7 @@ module.exports = NodeHelper.create({
 
         if (this.config.debug) {
             console.log("[MMM-WakeUpSensorPresence] gpiomon spawned – " +
-                "chip=" + chip + ", pin=" + pin +
+                "chip=" + resolvedChip + ", pin=" + pin +
                 ", args=" + JSON.stringify(args));
         }
 
